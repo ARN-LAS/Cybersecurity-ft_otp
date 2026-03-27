@@ -1,77 +1,39 @@
-1. Introduction
-Ce document décrit un programme en C qui utilise le TPM (Trusted Platform Module) pour générer des OTP (One-Time Passwords). Ce programme est sécurisé, utilise des fonctionnalités avancées du TPM, et est conçu pour être intégré dans des systèmes nécessitant une authentification forte.
-
-2. Fonctionnalités du Code
-a. Génération d'OTP
-
-Génère des OTP basés sur le temps (TOTP) toutes les 30 secondes.
-Utilise le TPM pour sécuriser la génération des OTP.
-b. Sécurité
-
-Utilise seccomp pour limiter les appels système et renforcer la sécurité.
-Efface les mots de passe de la mémoire après utilisation avec secure_clear.
-Utilise mlock pour empêcher le swapping de la mémoire contenant des informations sensibles.
-c. Gestion des Clés TPM
-
-Crée et gère des clés TPM pour la génération d'OTP.
-Utilise des index NV (Non-Volatile) pour stocker des compteurs.
-d. Interaction Utilisateur
-
-Demande un mot de passe à l'utilisateur pour accéder aux fonctionnalités TPM.
-Affiche l'OTP généré et permet à l'utilisateur de le vérifier.
-
-3. Technologies Utilisées
-a. TPM (Trusted Platform Module)
-
-Description : Module matériel sécurisé pour le stockage des clés cryptographiques et l'exécution d'opérations sécurisées.
-Utilisation : Génération et stockage sécurisé des clés, génération d'OTP.
-b. TSS2 (TPM Software Stack)
-
-Description : Bibliothèque logicielle pour interagir avec le TPM.
-Utilisation : Appels aux fonctions TPM pour créer des clés, lire/écrire des index NV, générer des HMAC.
-c. Seccomp (Secure Computing Mode)
-
-Description : Mécanisme de sécurité du noyau Linux pour restreindre les appels système.
-Utilisation : Limite les appels système autorisés pour renforcer la sécurité.
-d. Syscalls et Prctl
-
-Description : Appels système pour contrôler le comportement du processus.
-Utilisation : Désactive les core dumps avec prctl(PR_SET_DUMPABLE, 0).
-e. Termios
-
-Description : Interface pour contrôler les terminaux.
-Utilisation : Désactive l'écho pour la saisie sécurisée du mot de passe.
-
-4. Explication Complète du Code
-a. Constantes et Déclarations
-
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <termios.h>
+#include <syslog.h>
+#include <time.h>
+#include <endian.h>
+#include <stdarg.h>
+#include <sys/syscall.h>
+#include <tss2/tss2_esys.h>
+#include <tss2/tss2_tctildr.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <sys/prctl.h>
 
 #define PASSWORD_MAX 64
 #define NV_COUNTER_INDEX 0x01000001
 #define TPM_KEY_BASE 0x81000000
 
-
-
-
-PASSWORD_MAX : Taille maximale du mot de passe.
-NV_COUNTER_INDEX : Index NV pour stocker le compteur.
-TPM_KEY_BASE : Base pour les handles des clés TPM.
-b. Fonction secure_clear
-
+#define ERR_TPM_INIT         -1
+#define ERR_NV_COUNTER       -2
+#define ERR_KEY_ROTATION     -3
+#define ERR_OTP_GENERATION   -4
+#define ERR_PASSWORD_READ    -5
 
 void secure_clear(void *buf, size_t len) {
     if (!buf) return;
     volatile uint8_t *p = buf;
     while (len--) *p++ = 0;
 }
-
-
-
-
-Objectif : Efface de manière sécurisée un buffer en mémoire.
-Utilisation : Utilisé pour effacer les mots de passe après utilisation.
-c. Fonction read_password_secure
-
 
 int read_password_secure(int fd, char *password, size_t max_len, size_t *out_len) {
     struct termios oldt, newt;
@@ -88,20 +50,21 @@ int read_password_secure(int fd, char *password, size_t max_len, size_t *out_len
     return 0;
 }
 
-
-
-
-Objectif : Lit un mot de passe de manière sécurisée sans afficher les caractères saisis.
-Utilisation : Utilisé pour lire le mot de passe TPM.
-d. Fonction setup_seccomp
-
-
 void setup_seccomp(void) {
     struct sock_filter filter[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_read, 0, 11),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_write, 0, 10),
-        ...
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_ioctl, 0, 9),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_exit_group, 0, 8),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_exit, 0, 7),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_close, 0, 6),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_nanosleep, 0, 5),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_pselect6, 0, 4),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getrandom, 0, 3),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_brk, 0, 2),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mmap, 0, 1),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_munmap, 0, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS)
     };
@@ -110,28 +73,20 @@ void setup_seccomp(void) {
     prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
 }
 
-
-
-
-Objectif : Configure un filtre seccomp pour limiter les appels système autorisés.
-Utilisation : Renforce la sécurité en limitant les actions possibles du programme.
-e. Fonction setup_nv_counter
-
-
 int setup_nv_counter(ESYS_CONTEXT *ctx, TPMI_RH_NV_INDEX nv_index) {
-    TPM2B_AUTH auth = { .size = 0 };
+    TPM2B_AUTH auth = { .size = 0 }; 
     TPM2B_NV_PUBLIC publicInfo = {
         .size = sizeof(TPMS_NV_PUBLIC),
         .nvPublic = {
             .nvIndex = nv_index,
             .nameAlg = TPM2_ALG_SHA256,
             .attributes = TPMA_NV_AUTHWRITE | TPMA_NV_AUTHREAD,
-            .dataSize = 8
+            .dataSize = 8 
         }
     };
-    ESYS_TR nv_handle_out = ESYS_TR_NONE;
-    TSS2_RC rc = Esys_NV_DefineSpace(ctx, ESYS_TR_RH_OWNER, ESYS_TR_PASSWORD,
-                                    ESYS_TR_NONE, ESYS_TR_NONE,
+    ESYS_TR nv_handle_out = ESYS_TR_NONE; 
+    TSS2_RC rc = Esys_NV_DefineSpace(ctx, ESYS_TR_RH_OWNER, ESYS_TR_PASSWORD, 
+                                    ESYS_TR_NONE, ESYS_TR_NONE, 
                                     &auth, &publicInfo, &nv_handle_out);
 
     if (rc == 0x0000014c) return 0;
@@ -144,21 +99,13 @@ int setup_nv_counter(ESYS_CONTEXT *ctx, TPMI_RH_NV_INDEX nv_index) {
     return -1;
 }
 
-
-
-
-Objectif : Configure un espace NV (Non-Volatile) dans le TPM pour stocker un compteur.
-Utilisation : Utilisé pour initialiser et gérer le compteur NV.
-f. Fonction increment_manual_counter
-
-
 int increment_manual_counter(ESYS_CONTEXT *ctx, ESYS_TR nv_handle) {
     TPM2B_MAX_NV_BUFFER *read_data = NULL;
     TPM2B_AUTH auth_empty = { .size = 0 };
     Esys_TR_SetAuth(ctx, nv_handle, &auth_empty);
 
-    TSS2_RC rc = Esys_NV_Read(ctx, nv_handle, nv_handle,
-                             ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+    TSS2_RC rc = Esys_NV_Read(ctx, nv_handle, nv_handle, 
+                             ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, 
                              8, 0, &read_data);
     if (rc != TSS2_RC_SUCCESS || !read_data) return -1;
 
@@ -166,22 +113,14 @@ int increment_manual_counter(ESYS_CONTEXT *ctx, ESYS_TR nv_handle) {
     memcpy(&count, read_data->buffer, 8);
     uint64_t val = be64toh(count) + 1;
     count = htobe64(val);
-
+    
     TPM2B_MAX_NV_BUFFER write_data = { .size = 8 };
     memcpy(write_data.buffer, &count, 8);
     rc = Esys_NV_Write(ctx, nv_handle, nv_handle, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, &write_data, 0);
-
+    
     if (read_data) Esys_Free(read_data);
     return (rc == TSS2_RC_SUCCESS) ? 0 : -1;
 }
-
-
-
-
-Objectif : Lit et incrémente un compteur stocké dans l'espace NV du TPM.
-Utilisation : Utilisé pour incrémenter le compteur après chaque génération d'OTP.
-g. Fonction rotate_tpm_key
-
 
 int rotate_tpm_key(ESYS_CONTEXT *ctx, ESYS_TR *key_handle, TPM2_HANDLE key_index, char *pass, size_t pass_len) {
     TPM2B_SENSITIVE_CREATE inSens = {0};
@@ -201,14 +140,6 @@ int rotate_tpm_key(ESYS_CONTEXT *ctx, ESYS_TR *key_handle, TPM2_HANDLE key_index
     return (rc == TSS2_RC_SUCCESS) ? 0 : -1;
 }
 
-
-
-
-Objectif : Crée une clé TPM et la rend persistante.
-Utilisation : Utilisé pour créer et stocker la clé TPM utilisée pour générer les OTP.
-h. Fonction generate_totp
-
-
 int generate_totp(ESYS_CONTEXT *ctx, ESYS_TR key, char *pass, size_t pass_len, uint32_t *out_otp) {
     uint64_t interval = htobe64(time(NULL) / 30);
     TPM2B_MAX_BUFFER buf = { .size = sizeof(interval) };
@@ -227,17 +158,10 @@ int generate_totp(ESYS_CONTEXT *ctx, ESYS_TR key, char *pass, size_t pass_len, u
     return 0;
 }
 
-
-
-
-Objectif : Génère un OTP basé sur le temps (TOTP) en utilisant une clé TPM.
-Utilisation : Utilisé pour générer l'OTP affiché à l'utilisateur.
-i. Fonction main
-
-
 int main(void) {
+    // Désactiver les logs polluants de la bibliothèque TSS2
     setenv("TSS2_LOG", "all+none", 1);
-
+    
     prctl(PR_SET_DUMPABLE, 0);
     ESYS_CONTEXT *ctx = NULL;
     TSS2_TCTI_CONTEXT *tcti_ctx = NULL;
@@ -305,20 +229,3 @@ cleanup:
     if (tcti_ctx) Tss2_TctiLdr_Finalize(&tcti_ctx);
     return status_rc;
 }
-
-
-
-
-Objectif : Fonction principale qui orchestrer l'ensemble du processus de génération d'OTP.
-Étapes :
-
-Initialise le contexte TPM.
-Lit le mot de passe de manière sécurisée.
-Crée ou récupère la clé TPM.
-Configure et utilise l'espace NV pour le compteur.
-Génère et affiche l'OTP.
-Vérifie l'OTP saisi par l'utilisateur.
-
-
-5. Conclusion
-Ce programme est un exemple avancé de l'utilisation du TPM pour générer des OTP sécurisés. Il combine plusieurs technologies et bonnes pratiques pour offrir une solution robuste et sécurisée. Ce document a détaillé chaque fonction et chaque technologie utilisée pour fournir une compréhension complète du code

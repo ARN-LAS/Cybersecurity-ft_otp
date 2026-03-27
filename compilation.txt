@@ -1,0 +1,1 @@
+gcc -O3 -march=native -o tpm_engine main.c -ltss2-esys -ltss2-mu -Wl,-z,relro,-z,now
