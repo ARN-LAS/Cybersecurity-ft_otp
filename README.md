@@ -48,11 +48,11 @@ Utilisateur
 │       TPM 2.0       │
 │                     │
 │  Persistent Key     │
-│        │             │
-│        ├── HMAC      │
-│        │   SHA-256   │
-│        │             │
-│        └── TOTP      │
+│        │            │
+│        ├── HMAC     │
+│        │   SHA-256  │
+│        │            │
+│        └── TOTP     │
 │                     │
 │  NV Counter         │
 └─────────────────────┘
