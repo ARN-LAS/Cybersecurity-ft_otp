@@ -1,324 +1,495 @@
-1. Introduction
-Ce document décrit un programme en C qui utilise le TPM (Trusted Platform Module) pour générer des OTP (One-Time Passwords). Ce programme est sécurisé, utilise des fonctionnalités avancées du TPM, et est conçu pour être intégré dans des systèmes nécessitant une authentification forte.
+# 🔐 TPM2 TOTP Generator
 
-2. Fonctionnalités du Code
-a. Génération d'OTP
+Générateur de codes **TOTP (Time-Based One-Time Password)** écrit en **C**, utilisant un **TPM 2.0 (Trusted Platform Module)** pour protéger les opérations cryptographiques et les clés sensibles.
 
-Génère des OTP basés sur le temps (TOTP) toutes les 30 secondes.
-Utilise le TPM pour sécuriser la génération des OTP.
-b. Sécurité
+Le programme génère un OTP à **6 chiffres**, renouvelé toutes les **30 secondes**, à partir d'un HMAC-SHA256 calculé directement par le TPM.
 
-Utilise seccomp pour limiter les appels système et renforcer la sécurité.
-Efface les mots de passe de la mémoire après utilisation avec secure_clear.
-Utilise mlock pour empêcher le swapping de la mémoire contenant des informations sensibles.
-c. Gestion des Clés TPM
+Il intègre également plusieurs mécanismes de durcissement Linux : **seccomp**, `mlock()`, désactivation des core dumps et saisie sécurisée du mot de passe.
 
-Crée et gère des clés TPM pour la génération d'OTP.
-Utilise des index NV (Non-Volatile) pour stocker des compteurs.
-d. Interaction Utilisateur
+---
 
-Demande un mot de passe à l'utilisateur pour accéder aux fonctionnalités TPM.
-Affiche l'OTP généré et permet à l'utilisateur de le vérifier.
+## ✨ Fonctionnalités
 
-3. Technologies Utilisées
-a. TPM (Trusted Platform Module)
+* 🔑 Génération de TOTP à 6 chiffres
+* ⏱️ Fenêtre temporelle de 30 secondes
+* 🛡️ Calcul HMAC-SHA256 effectué par le TPM
+* 🔐 Clé TPM persistante protégée par mot de passe
+* 💾 Utilisation de la mémoire NV du TPM pour maintenir un compteur
+* 🧠 Protection des données sensibles avec `mlock()`
+* 🧹 Effacement explicite des mots de passe en mémoire
+* 🚫 Désactivation des core dumps
+* 🔒 Filtrage des appels système avec `seccomp`
+* ⌨️ Saisie du mot de passe sans écho terminal
+* ✅ Vérification interactive de l'OTP généré
 
-Description : Module matériel sécurisé pour le stockage des clés cryptographiques et l'exécution d'opérations sécurisées.
-Utilisation : Génération et stockage sécurisé des clés, génération d'OTP.
-b. TSS2 (TPM Software Stack)
+---
 
-Description : Bibliothèque logicielle pour interagir avec le TPM.
-Utilisation : Appels aux fonctions TPM pour créer des clés, lire/écrire des index NV, générer des HMAC.
-c. Seccomp (Secure Computing Mode)
+## 🏗️ Architecture
 
-Description : Mécanisme de sécurité du noyau Linux pour restreindre les appels système.
-Utilisation : Limite les appels système autorisés pour renforcer la sécurité.
-d. Syscalls et Prctl
+Le fonctionnement général est le suivant :
 
-Description : Appels système pour contrôler le comportement du processus.
-Utilisation : Désactive les core dumps avec prctl(PR_SET_DUMPABLE, 0).
-e. Termios
+```text
+Utilisateur
+    │
+    │ Mot de passe TPM
+    ▼
+┌─────────────────────┐
+│   Application C     │
+│                     │
+│  - Termios          │
+│  - mlock            │
+│  - secure_clear     │
+│  - seccomp          │
+└──────────┬──────────┘
+           │
+           │ TSS2 / ESAPI
+           ▼
+┌─────────────────────┐
+│       TPM 2.0       │
+│                     │
+│  Persistent Key     │
+│        │             │
+│        ├── HMAC      │
+│        │   SHA-256   │
+│        │             │
+│        └── TOTP      │
+│                     │
+│  NV Counter         │
+└─────────────────────┘
+```
 
-Description : Interface pour contrôler les terminaux.
-Utilisation : Désactive l'écho pour la saisie sécurisée du mot de passe.
+Le secret cryptographique utilisé pour le HMAC est associé à une clé TPM persistante.
 
-4. Explication Complète du Code
-a. Constantes et Déclarations
+L'application transmet au TPM la valeur temporelle :
 
+```text
+floor(timestamp / 30)
+```
 
-#define PASSWORD_MAX 64
-#define NV_COUNTER_INDEX 0x01000001
-#define TPM_KEY_BASE 0x81000000
+Le TPM calcule ensuite un **HMAC-SHA256**. Une troncature dynamique est appliquée au résultat afin d'obtenir un OTP à 6 chiffres.
 
+---
 
+## 🧰 Technologies utilisées
 
+| Technologie        | Rôle                                               |
+| ------------------ | -------------------------------------------------- |
+| **C**              | Implémentation principale                          |
+| **TPM 2.0**        | Protection des clés et opérations cryptographiques |
+| **TSS2 / ESAPI**   | Communication avec le TPM                          |
+| **HMAC-SHA256**    | Calcul cryptographique utilisé pour le TOTP        |
+| **TPM NV Storage** | Stockage persistant du compteur                    |
+| **seccomp**        | Restriction des appels système                     |
+| **prctl**          | Durcissement du processus                          |
+| **mlock**          | Empêche le swap des données sensibles              |
+| **termios**        | Contrôle sécurisé de la saisie terminal            |
+| **Linux TCTI**     | Communication avec `/dev/tpmrm0`                   |
 
-PASSWORD_MAX : Taille maximale du mot de passe.
-NV_COUNTER_INDEX : Index NV pour stocker le compteur.
-TPM_KEY_BASE : Base pour les handles des clés TPM.
-b. Fonction secure_clear
+---
 
+## 🔐 Mesures de sécurité
 
-void secure_clear(void *buf, size_t len) {
-    if (!buf) return;
+### Protection du mot de passe
+
+Le mot de passe TPM est lu directement depuis `/dev/tty`.
+
+L'écho du terminal est temporairement désactivé :
+
+```c
+newt.c_lflag &= ~(ECHO | ISIG);
+```
+
+Le mot de passe n'est donc pas affiché pendant sa saisie.
+
+---
+
+### Protection contre le swap
+
+Le buffer contenant le mot de passe est verrouillé en mémoire :
+
+```c
+mlock(password, sizeof(password));
+```
+
+Cela réduit le risque que son contenu soit écrit dans la zone de swap du système.
+
+Lors du nettoyage :
+
+```c
+munlock(password, sizeof(password));
+```
+
+---
+
+### Effacement sécurisé de la mémoire
+
+Une fonction dédiée écrase explicitement les données sensibles :
+
+```c
+void secure_clear(void *buf, size_t len)
+{
+    if (!buf)
+        return;
+
     volatile uint8_t *p = buf;
-    while (len--) *p++ = 0;
+
+    while (len--)
+        *p++ = 0;
 }
+```
 
+Elle est notamment utilisée avant la fin du programme :
 
+```c
+secure_clear(password, sizeof(password));
+```
 
+---
 
-Objectif : Efface de manière sécurisée un buffer en mémoire.
-Utilisation : Utilisé pour effacer les mots de passe après utilisation.
-c. Fonction read_password_secure
+### Désactivation des core dumps
 
+Le programme empêche la génération de core dumps :
 
-int read_password_secure(int fd, char *password, size_t max_len, size_t *out_len) {
-    struct termios oldt, newt;
-    if (tcgetattr(fd, &oldt) != 0) return -1;
-    newt = oldt;
-    newt.c_lflag &= ~(ECHO | ISIG);
-    if (tcsetattr(fd, TCSAFLUSH, &newt) != 0) return -1;
-    ssize_t n = read(fd, password, max_len - 1);
-    if (n >= 0) password[n] = '\0';
-    tcsetattr(fd, TCSAFLUSH, &oldt);
-    if (n < 0) return -1;
-    if (n > 0 && password[n-1] == '\n') n--;
-    *out_len = (size_t)n;
-    return 0;
-}
+```c
+prctl(PR_SET_DUMPABLE, 0);
+```
 
+Cela évite qu'un dump mémoire du processus expose accidentellement des informations sensibles.
 
+---
 
+### Sandbox seccomp
 
-Objectif : Lit un mot de passe de manière sécurisée sans afficher les caractères saisis.
-Utilisation : Utilisé pour lire le mot de passe TPM.
-d. Fonction setup_seccomp
+Un filtre **seccomp BPF** limite les appels système que le processus peut exécuter.
 
+Le programme active également :
 
-void setup_seccomp(void) {
-    struct sock_filter filter[] = {
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_read, 0, 11),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_write, 0, 10),
-        ...
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS)
-    };
-    struct sock_fprog prog = { .len = sizeof(filter)/sizeof(filter[0]), .filter = filter };
-    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
-}
+```c
+prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+```
 
+puis applique son filtre :
 
+```c
+prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+```
 
+Tout appel système non autorisé peut alors provoquer l'arrêt du processus.
 
-Objectif : Configure un filtre seccomp pour limiter les appels système autorisés.
-Utilisation : Renforce la sécurité en limitant les actions possibles du programme.
-e. Fonction setup_nv_counter
+---
 
+## 🔑 Gestion des clés TPM
 
-int setup_nv_counter(ESYS_CONTEXT *ctx, TPMI_RH_NV_INDEX nv_index) {
-    TPM2B_AUTH auth = { .size = 0 };
-    TPM2B_NV_PUBLIC publicInfo = {
-        .size = sizeof(TPMS_NV_PUBLIC),
-        .nvPublic = {
-            .nvIndex = nv_index,
-            .nameAlg = TPM2_ALG_SHA256,
-            .attributes = TPMA_NV_AUTHWRITE | TPMA_NV_AUTHREAD,
-            .dataSize = 8
-        }
-    };
-    ESYS_TR nv_handle_out = ESYS_TR_NONE;
-    TSS2_RC rc = Esys_NV_DefineSpace(ctx, ESYS_TR_RH_OWNER, ESYS_TR_PASSWORD,
-                                    ESYS_TR_NONE, ESYS_TR_NONE,
-                                    &auth, &publicInfo, &nv_handle_out);
+### Handle de base
 
-    if (rc == 0x0000014c) return 0;
-    if (rc == TSS2_RC_SUCCESS) {
-        TPM2B_MAX_NV_BUFFER zero_buf = { .size = 8, .buffer = {0} };
-        Esys_NV_Write(ctx, nv_handle_out, nv_handle_out, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, &zero_buf, 0);
-        Esys_FlushContext(ctx, nv_handle_out);
-        return 0;
+Les clés persistantes utilisent la base :
+
+```c
+#define TPM_KEY_BASE 0x81000000
+```
+
+Le handle de la clé est ensuite dérivé de l'UID Unix :
+
+```c
+uid_t uid = getuid();
+
+TPM2_HANDLE k_idx =
+    TPM_KEY_BASE + (uid * 997 % 0x1000);
+```
+
+Cela permet d'utiliser un emplacement de clé différent selon l'utilisateur.
+
+---
+
+### Création de la clé
+
+Si aucune clé n'existe au handle calculé, le programme appelle :
+
+```c
+rotate_tpm_key(
+    ctx,
+    &tpm_key,
+    k_idx,
+    password,
+    password_len
+);
+```
+
+La clé créée est de type :
+
+```c
+TPM2_ALG_KEYEDHASH
+```
+
+avec un schéma :
+
+```c
+TPM2_ALG_HMAC
+```
+
+et l'algorithme :
+
+```c
+TPM2_ALG_SHA256
+```
+
+Elle est ensuite rendue persistante grâce à :
+
+```c
+Esys_EvictControl(...)
+```
+
+---
+
+## ⏱️ Génération du TOTP
+
+La génération commence par déterminer la fenêtre temporelle courante :
+
+```c
+uint64_t interval = htobe64(time(NULL) / 30);
+```
+
+Cette valeur est envoyée au TPM.
+
+L'application demande ensuite au TPM de produire un HMAC :
+
+```c
+Esys_HMAC(
+    ctx,
+    key,
+    ESYS_TR_PASSWORD,
+    ESYS_TR_NONE,
+    ESYS_TR_NONE,
+    &buf,
+    TPM2_ALG_SHA256,
+    &hmac_out
+);
+```
+
+Le résultat utilise ensuite une troncature dynamique :
+
+```c
+int offset =
+    hmac_out->buffer[hmac_out->size - 1] & 0xf;
+
+uint32_t bin_code;
+
+memcpy(
+    &bin_code,
+    &hmac_out->buffer[offset],
+    sizeof(bin_code)
+);
+```
+
+Le code final est ramené sur six chiffres :
+
+```c
+*out_otp =
+    (be32toh(bin_code) & 0x7fffffff) % 1000000;
+```
+
+Exemple :
+
+```text
+Your OTP: 482731
+```
+
+---
+
+## 💾 Compteur NV
+
+Le programme utilise un index TPM NV :
+
+```c
+#define NV_COUNTER_INDEX 0x01000001
+```
+
+Un espace de **8 octets** y est réservé.
+
+Lors de son initialisation :
+
+```c
+TPM2B_NV_PUBLIC publicInfo = {
+    .size = sizeof(TPMS_NV_PUBLIC),
+
+    .nvPublic = {
+        .nvIndex = nv_index,
+        .nameAlg = TPM2_ALG_SHA256,
+
+        .attributes =
+            TPMA_NV_AUTHWRITE |
+            TPMA_NV_AUTHREAD,
+
+        .dataSize = 8
     }
-    return -1;
-}
+};
+```
 
+Après chaque génération réussie d'un OTP, la valeur est lue :
 
+```c
+Esys_NV_Read(...)
+```
 
+puis incrémentée :
 
-Objectif : Configure un espace NV (Non-Volatile) dans le TPM pour stocker un compteur.
-Utilisation : Utilisé pour initialiser et gérer le compteur NV.
-f. Fonction increment_manual_counter
+```c
+uint64_t val = be64toh(count) + 1;
+count = htobe64(val);
+```
 
+et réécrite dans le TPM :
 
-int increment_manual_counter(ESYS_CONTEXT *ctx, ESYS_TR nv_handle) {
-    TPM2B_MAX_NV_BUFFER *read_data = NULL;
-    TPM2B_AUTH auth_empty = { .size = 0 };
-    Esys_TR_SetAuth(ctx, nv_handle, &auth_empty);
+```c
+Esys_NV_Write(...)
+```
 
-    TSS2_RC rc = Esys_NV_Read(ctx, nv_handle, nv_handle,
-                             ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
-                             8, 0, &read_data);
-    if (rc != TSS2_RC_SUCCESS || !read_data) return -1;
+> **Note :** dans l'implémentation présentée, ce compteur est maintenu parallèlement à la génération du TOTP. La valeur du compteur NV n'entre pas directement dans le calcul du code TOTP.
 
-    uint64_t count;
-    memcpy(&count, read_data->buffer, 8);
-    uint64_t val = be64toh(count) + 1;
-    count = htobe64(val);
+---
 
-    TPM2B_MAX_NV_BUFFER write_data = { .size = 8 };
-    memcpy(write_data.buffer, &count, 8);
-    rc = Esys_NV_Write(ctx, nv_handle, nv_handle, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, &write_data, 0);
+## 🔄 Déroulement du programme
 
-    if (read_data) Esys_Free(read_data);
-    return (rc == TSS2_RC_SUCCESS) ? 0 : -1;
-}
+Au lancement, l'application :
 
+1. désactive les core dumps ;
+2. ouvre `/dev/tty` ;
+3. initialise la communication avec `/dev/tpmrm0` ;
+4. initialise le contexte ESAPI ;
+5. verrouille le buffer du mot de passe en mémoire ;
+6. demande le mot de passe TPM ;
+7. recherche la clé persistante associée à l'utilisateur ;
+8. crée la clé si elle n'existe pas ;
+9. initialise l'espace NV ;
+10. active le filtre seccomp ;
+11. génère le TOTP via le TPM ;
+12. incrémente le compteur NV ;
+13. affiche le code ;
+14. demande à l'utilisateur de saisir le code pour le vérifier ;
+15. nettoie les données sensibles et libère les ressources.
 
+---
 
+## 🖥️ Exemple d'utilisation
 
-Objectif : Lit et incrémente un compteur stocké dans l'espace NV du TPM.
-Utilisation : Utilisé pour incrémenter le compteur après chaque génération d'OTP.
-g. Fonction rotate_tpm_key
+```text
+Enter TPM Password:
 
+Your OTP: 482731
+Verify OTP: 482731
 
-int rotate_tpm_key(ESYS_CONTEXT *ctx, ESYS_TR *key_handle, TPM2_HANDLE key_index, char *pass, size_t pass_len) {
-    TPM2B_SENSITIVE_CREATE inSens = {0};
-    TPM2B_PUBLIC inPub = {0};
-    inSens.sensitive.userAuth.size = (uint16_t)pass_len;
-    if (pass_len > 0) memcpy(inSens.sensitive.userAuth.buffer, pass, pass_len);
-    inPub.publicArea.type = TPM2_ALG_KEYEDHASH;
-    inPub.publicArea.nameAlg = TPM2_ALG_SHA256;
-    inPub.publicArea.objectAttributes = (TPMA_OBJECT_USERWITHAUTH | TPMA_OBJECT_SIGN_ENCRYPT | TPMA_OBJECT_FIXEDTPM | TPMA_OBJECT_FIXEDPARENT | TPMA_OBJECT_SENSITIVEDATAORIGIN);
-    inPub.publicArea.parameters.keyedHashDetail.scheme.scheme = TPM2_ALG_HMAC;
-    inPub.publicArea.parameters.keyedHashDetail.scheme.details.hmac.hashAlg = TPM2_ALG_SHA256;
-    ESYS_TR trans = ESYS_TR_NONE;
-    TSS2_RC rc = Esys_CreatePrimary(ctx, ESYS_TR_RH_OWNER, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, &inSens, &inPub, NULL, NULL, &trans, NULL, NULL, NULL, NULL);
-    if (rc != TSS2_RC_SUCCESS) return -1;
-    rc = Esys_EvictControl(ctx, ESYS_TR_RH_OWNER, trans, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, key_index, key_handle);
-    Esys_FlushContext(ctx, trans);
-    return (rc == TSS2_RC_SUCCESS) ? 0 : -1;
-}
+[SUCCESS] Access Granted.
+```
 
+En cas de mauvais code :
 
+```text
+Your OTP: 482731
+Verify OTP: 123456
 
+[FAILURE] Access Denied.
+```
 
-Objectif : Crée une clé TPM et la rend persistante.
-Utilisation : Utilisé pour créer et stocker la clé TPM utilisée pour générer les OTP.
-h. Fonction generate_totp
+---
 
+## 🧹 Nettoyage
 
-int generate_totp(ESYS_CONTEXT *ctx, ESYS_TR key, char *pass, size_t pass_len, uint32_t *out_otp) {
-    uint64_t interval = htobe64(time(NULL) / 30);
-    TPM2B_MAX_BUFFER buf = { .size = sizeof(interval) };
-    memcpy(buf.buffer, &interval, sizeof(interval));
-    TPM2B_AUTH auth = { .size = (uint16_t)pass_len };
-    memcpy(auth.buffer, pass, pass_len);
-    Esys_TR_SetAuth(ctx, key, &auth);
-    TPM2B_DIGEST *hmac_out = NULL;
-    TSS2_RC rc = Esys_HMAC(ctx, key, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE, &buf, TPM2_ALG_SHA256, &hmac_out);
-    if (rc != TSS2_RC_SUCCESS) return -1;
-    int offset = hmac_out->buffer[hmac_out->size - 1] & 0xf;
-    uint32_t bin_code;
-    memcpy(&bin_code, &hmac_out->buffer[offset], sizeof(bin_code));
-    *out_otp = (be32toh(bin_code) & 0x7fffffff) % 1000000;
-    Esys_Free(hmac_out);
-    return 0;
-}
+Avant de quitter, l'application effectue notamment :
 
+```c
+secure_clear(password, sizeof(password));
+munlock(password, sizeof(password));
 
+if (tty_fd >= 0)
+    close(tty_fd);
 
+if (ctx)
+    Esys_Finalize(&ctx);
 
-Objectif : Génère un OTP basé sur le temps (TOTP) en utilisant une clé TPM.
-Utilisation : Utilisé pour générer l'OTP affiché à l'utilisateur.
-i. Fonction main
+if (tcti_ctx)
+    Tss2_TctiLdr_Finalize(&tcti_ctx);
+```
 
+L'objectif est de limiter la durée de vie des données sensibles et de libérer correctement les ressources TPM.
 
-int main(void) {
-    setenv("TSS2_LOG", "all+none", 1);
+---
 
-    prctl(PR_SET_DUMPABLE, 0);
-    ESYS_CONTEXT *ctx = NULL;
-    TSS2_TCTI_CONTEXT *tcti_ctx = NULL;
-    ESYS_TR tpm_key = ESYS_TR_NONE, nv_handle = ESYS_TR_NONE;
-    char password[PASSWORD_MAX];
-    size_t password_len = 0;
-    int status_rc = 0, tty_fd = open("/dev/tty", O_RDWR | O_CLOEXEC);
-    if (tty_fd < 0) return ERR_PASSWORD_READ;
+## 📌 Constantes principales
 
-    if (Tss2_TctiLdr_Initialize("device:/dev/tpmrm0", &tcti_ctx) != TSS2_RC_SUCCESS) {
-        status_rc = ERR_TPM_INIT; goto cleanup;
-    }
-    if (Esys_Initialize(&ctx, tcti_ctx, NULL) != TSS2_RC_SUCCESS) {
-        status_rc = ERR_TPM_INIT; goto cleanup;
-    }
+```c
+#define PASSWORD_MAX      64
+#define NV_COUNTER_INDEX  0x01000001
+#define TPM_KEY_BASE      0x81000000
+```
 
-    mlock(password, sizeof(password));
-    dprintf(tty_fd, "\r\033[KEnter TPM Password: ");
-    read_password_secure(tty_fd, password, sizeof(password), &password_len);
+| Constante          | Description                            |
+| ------------------ | -------------------------------------- |
+| `PASSWORD_MAX`     | Taille maximale du mot de passe        |
+| `NV_COUNTER_INDEX` | Index NV utilisé pour le compteur      |
+| `TPM_KEY_BASE`     | Base des handles des clés persistantes |
 
-    uid_t uid = getuid();
-    TPM2_HANDLE k_idx = TPM_KEY_BASE + (uid * 997 % 0x1000);
-    if (Esys_TR_FromTPMPublic(ctx, k_idx, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, &tpm_key) != TSS2_RC_SUCCESS) {
-        if (rotate_tpm_key(ctx, &tpm_key, k_idx, password, password_len) != 0) {
-            status_rc = ERR_KEY_ROTATION; goto cleanup;
-        }
-    }
+---
 
-    TPMI_RH_NV_INDEX nv_idx = NV_COUNTER_INDEX;
-    setup_nv_counter(ctx, nv_idx);
-    if (Esys_TR_FromTPMPublic(ctx, nv_idx, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, &nv_handle) != TSS2_RC_SUCCESS) {
-        status_rc = ERR_NV_COUNTER; goto cleanup;
-    }
+## ⚙️ Prérequis
 
-    setup_seccomp();
-    uint32_t otp = 0;
-    if (generate_totp(ctx, tpm_key, password, password_len, &otp) == 0) {
-        increment_manual_counter(ctx, nv_handle);
-        dprintf(tty_fd, "\nYour OTP: \033[1;33m%06u\033[0m\n", otp);
+Le programme cible un environnement **Linux** équipé d'un **TPM 2.0** accessible via :
 
-        dprintf(tty_fd, "Verify OTP: ");
-        char input_buf[10] = {0};
-        struct termios v_term;
-        tcgetattr(tty_fd, &v_term);
-        v_term.c_lflag |= ECHO;
-        tcsetattr(tty_fd, TCSAFLUSH, &v_term);
+```text
+/dev/tpmrm0
+```
 
-        if (read(tty_fd, input_buf, sizeof(input_buf) - 1) > 0) {
-            if ((uint32_t)atoi(input_buf) == otp) {
-                dprintf(tty_fd, "\033[32m[SUCCESS]\033[0m Access Granted.\n");
-            } else {
-                dprintf(tty_fd, "\033[31m[FAILURE]\033[0m Access Denied.\n");
-                status_rc = -6;
-            }
-        }
-    } else {
-        status_rc = ERR_OTP_GENERATION;
-    }
+Il dépend également de la pile logicielle **TPM2-TSS / TSS2**.
 
-cleanup:
-    secure_clear(password, sizeof(password));
-    munlock(password, sizeof(password));
-    if (tty_fd >= 0) close(tty_fd);
-    if (ctx) Esys_Finalize(&ctx);
-    if (tcti_ctx) Tss2_TctiLdr_Finalize(&tcti_ctx);
-    return status_rc;
-}
+> Les commandes exactes d'installation des dépendances et de compilation ne figurent pas dans la documentation d'origine et doivent être adaptées à la distribution Linux et au système de build utilisés par le projet.
 
+---
 
+## ⚠️ Notes de sécurité
 
+Ce projet manipule des primitives cryptographiques, des clés TPM et des mécanismes de sécurité bas niveau.
 
-Objectif : Fonction principale qui orchestrer l'ensemble du processus de génération d'OTP.
-Étapes :
+Avant une utilisation en production, il est recommandé de réaliser une revue spécifique portant notamment sur :
 
-Initialise le contexte TPM.
-Lit le mot de passe de manière sécurisée.
-Crée ou récupère la clé TPM.
-Configure et utilise l'espace NV pour le compteur.
-Génère et affiche l'OTP.
-Vérifie l'OTP saisi par l'utilisateur.
+* les permissions TPM et NV ;
+* la gestion des handles persistants ;
+* la politique d'authentification TPM ;
+* la liste exacte des syscalls autorisés par seccomp ;
+* la gestion de toutes les valeurs de retour ;
+* la restauration de l'état du terminal en cas d'erreur ;
+* la concurrence entre plusieurs processus ;
+* la gestion du cycle de vie des clés.
 
+---
 
-5. Conclusion
-Ce programme est un exemple avancé de l'utilisation du TPM pour générer des OTP sécurisés. Il combine plusieurs technologies et bonnes pratiques pour offrir une solution robuste et sécurisée. Ce document a détaillé chaque fonction et chaque technologie utilisée pour fournir une compréhension complète du code
+## 📚 Fonctions principales
+
+| Fonction                     | Rôle                              |
+| ---------------------------- | --------------------------------- |
+| `secure_clear()`             | Efface un buffer sensible         |
+| `read_password_secure()`     | Lit un mot de passe sans écho     |
+| `setup_seccomp()`            | Active le sandbox seccomp         |
+| `setup_nv_counter()`         | Initialise l'espace NV            |
+| `increment_manual_counter()` | Incrémente le compteur persistant |
+| `rotate_tpm_key()`           | Crée et persiste une clé TPM      |
+| `generate_totp()`            | Génère un TOTP via HMAC-SHA256    |
+| `main()`                     | Orchestre l'ensemble du programme |
+
+---
+
+## 🎯 Objectif du projet
+
+Ce projet démontre comment combiner les fonctionnalités d'un **TPM 2.0** avec les mécanismes de sécurité disponibles sous Linux afin de construire un générateur d'OTP dont les opérations cryptographiques sensibles restent protégées par le TPM.
+
+Il constitue notamment un exemple d'utilisation de :
+
+```text
+TPM 2.0
+   +
+TSS2 / ESAPI
+   +
+HMAC-SHA256
+   +
+Linux hardening
+   =
+TOTP protégé par matériel
+```
